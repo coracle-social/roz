@@ -77,35 +77,74 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/notary/:key", get(get_timestamp))
         .with_state(state.clone());
 
-    // Run it on localhost:3000
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
-    println!("Server running on http://127.0.0.1:3000");
+    // Run it on localhost:3981
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3981").await?;
+    println!("Server running on http://127.0.0.1:3981");
 
-    // Set up a nostr client and listen for events to notarize
-    let keys: Keys = Keys::generate();
-    let client = Client::new(keys);
-    client.add_relay("wss://relay.damus.io").await?;
-    client.add_relay("wss://nos.lol").await?;
-    client.connect().await;
+    // Clone state for the event handling task
+    let event_state = state.clone();
 
-    let filter = Filter::new()
-        .since(Timestamp::now() - Duration::from_secs(30));
+    // Spawn the event handling task
+    let event_handle = tokio::spawn(async move {
+        loop {
+            // Set up a nostr client and listen for events to notarize
+            let keys: Keys = Keys::generate();
+            let client = Client::new(keys);
 
-    let mut stream = client.stream_events(vec![filter], Duration::MAX).await?;
+            client.add_relay("wss://relay.damus.io").await?;
+            client.add_relay("wss://nos.lol").await?;
+            client.connect().await;
 
-    while let Some(event) = stream.next().await {
-        if EPHEMERAL_RANGE.contains(&event.kind.as_u16()) {
-            continue
+            let filter = Filter::new()
+                .since(Timestamp::now() - Duration::from_secs(30));
+
+            let mut stream = client.stream_events(vec![filter], Duration::MAX).await?;
+
+            println!("INFO: starting stream");
+
+            while let Some(event) = stream.next().await {
+                if EPHEMERAL_RANGE.contains(&event.kind.as_u16()) {
+                    continue
+                }
+
+                let mut txn = event_state.env.begin_rw_txn().unwrap();
+                let timestamp = Timestamp::now();
+                let secs = timestamp.as_u64().to_le_bytes();
+                let key = event.id.to_hex();
+
+                println!("INFO: Saw {} at {}", key, timestamp);
+
+                txn.put(event_state.db, &key, &secs, lmdb::WriteFlags::empty()).unwrap();
+                txn.commit().unwrap();
+            }
         }
 
-        let mut txn = state.env.begin_rw_txn()?;
-        let timestamp = Timestamp::now();
-        let secs = timestamp.as_u64().to_le_bytes();
-        let key = event.id.to_hex();
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
+    });
 
-        txn.put(state.db, &key, &secs, lmdb::WriteFlags::empty())?;
-        txn.commit()?;
+    // Spawn the HTTP server task
+    let server_handle = tokio::spawn(async move {
+        println!("INFO: Starting HTTP server...");
+
+        match axum::serve(listener, app).await {
+            Ok(_) => println!("INFO: Server shut down gracefully"),
+            Err(e) => eprintln!("ERROR: Server error: {}", e)
+        }
+    });
+
+    // Wait for either task to finish (or error)
+    tokio::select! {
+        event_result = event_handle => {
+            if let Err(e) = event_result {
+                eprintln!("ERROR: Event handling task failed: {}", e);
+            }
+        }
+        server_result = server_handle => {
+            if let Err(e) = server_result {
+                eprintln!("ERROR: Server task failed: {}", e);
+            }
+        }
     }
 
-    Ok(axum::serve(listener, app).await?)
+    Ok(())
 }
