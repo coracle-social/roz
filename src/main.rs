@@ -34,10 +34,11 @@ async fn get_timestamp(
 ) -> impl IntoResponse {
     let txn = state.env.begin_ro_txn().unwrap();
 
-    match txn.get(state.db, &params.key.as_bytes()) {
+    match txn.get(state.db, &params.key) {
         Ok(value) => {
             if !value.is_empty() {
-                (StatusCode::OK, Json(json!({ "seen": String::from_utf8_lossy(value) }))).into_response()
+                let timestamp = u64::from_le_bytes(value.try_into().unwrap());
+                (StatusCode::OK, Json(json!({ "seen": timestamp }))).into_response()
             } else {
                 (StatusCode::NOT_FOUND, Json(json!({ "error": "Key not found" }))).into_response()
             }
@@ -48,7 +49,7 @@ async fn get_timestamp(
                     (StatusCode::NOT_FOUND, Json(json!({ "error": "Key not found" }))).into_response()
                 },
                 _ => {
-                    println!("ERROR: {}", e);
+                    println!("Database error: {}", e);
                     (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "Internal server error" }))).into_response()
                 }
             }
@@ -97,13 +98,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             continue
         }
 
-        println!("Received event: {:?}", event);
-
         let mut txn = state.env.begin_rw_txn()?;
         let timestamp = Timestamp::now();
         let secs = timestamp.as_u64().to_le_bytes();
+        let key = event.id.to_hex();
 
-        txn.put(state.db, &event.id, &secs, lmdb::WriteFlags::empty())?;
+        txn.put(state.db, &key, &secs, lmdb::WriteFlags::empty())?;
+        txn.commit()?;
     }
 
     Ok(axum::serve(listener, app).await?)
