@@ -4,7 +4,9 @@ A notary for nostr.
 
 The idea is that if many parties run independent notaries, you can get a fairly high level of confidence when an event first appeared on the network. This can be useful for many things, such as key rotation schemes.
 
-Long-term, it would make more sense to add this functionality to relays rather than run independent service providers. To that end, see [this draft NIP]().
+Long-term, it would make more sense to add this functionality to relays rather than run independent service providers. To that end, see [this draft NIP](https://github.com/nostr-protocol/nips/pull/1737).
+
+![roz](./roz.jpg)
 
 # Usage
 
