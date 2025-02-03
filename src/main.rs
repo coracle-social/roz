@@ -6,10 +6,8 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use std::time::{Duration};
-use nostr_sdk::{Client, Filter, Keys, Timestamp};
-use nostr_sdk::event::kind::{EPHEMERAL_RANGE};
-use nostr_sdk::async_utility::futures_util::StreamExt;
+use std::time::Duration;
+use nostr_sdk::prelude::*;
 use serde::Deserialize;
 use serde_json::json;
 use lmdb;
@@ -91,35 +89,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let keys: Keys = Keys::generate();
             let client = Client::new(keys);
 
-            client.add_relay("wss://relay.damus.io").await?;
-            client.add_relay("wss://nos.lol").await?;
+            client.add_relay("wss://relay.damus.io").await.unwrap();
+            client.add_relay("wss://nos.lol").await.unwrap();
             client.connect().await;
 
             let filter = Filter::new()
                 .since(Timestamp::now() - Duration::from_secs(30));
 
-            let mut stream = client.stream_events(vec![filter], Duration::MAX).await?;
+            let Output { val: sub_id, .. } = client.subscribe(vec![filter], None).await.unwrap();
 
-            println!("INFO: starting stream");
+            println!("INFO: starting subscription");
 
-            while let Some(event) = stream.next().await {
-                if EPHEMERAL_RANGE.contains(&event.kind.as_u16()) {
-                    continue
-                }
+            client
+                .handle_notifications(|notification| async {
+                    if let RelayPoolNotification::Event {
+                        subscription_id,
+                        event,
+                        ..
+                    } = notification
+                    {
+                        if subscription_id == sub_id && !EPHEMERAL_RANGE.contains(&event.kind.as_u16()) {
+                            let mut txn = event_state.env.begin_rw_txn().unwrap();
+                            let timestamp = Timestamp::now();
+                            let secs = timestamp.as_u64().to_le_bytes();
+                            let key = event.id.to_hex();
 
-                let mut txn = event_state.env.begin_rw_txn().unwrap();
-                let timestamp = Timestamp::now();
-                let secs = timestamp.as_u64().to_le_bytes();
-                let key = event.id.to_hex();
+                            println!("INFO: Saw {} at {}", key, timestamp);
 
-                println!("INFO: Saw {} at {}", key, timestamp);
+                            txn.put(event_state.db, &key, &secs, lmdb::WriteFlags::empty()).unwrap();
+                            txn.commit().unwrap();
+                        }
+                    }
 
-                txn.put(event_state.db, &key, &secs, lmdb::WriteFlags::empty()).unwrap();
-                txn.commit().unwrap();
-            }
+                    Ok(false)
+                })
+                .await.unwrap();
         }
-
-        Ok::<(), Box<dyn Error + Send + Sync>>(())
     });
 
     // Spawn the HTTP server task
